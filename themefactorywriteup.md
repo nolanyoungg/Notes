@@ -15,3 +15,20 @@
  
 7. Package the ZIP
 8. Rebuild the preview gallery
+
+
+
+One-pass generation contract
+
+For a full theme:run:
+
+Source ZIP preflight rejects traversal, duplicate paths, symlinks, encrypted entries, archive bombs, and unsafe file types.
+The source archive is copied to run staging and extracted safely.
+A valid single WordPress theme root is discovered and copied into wp-content/themes/<slug>/.
+npm ci executes exactly once in that prepared theme.
+Codex executes exactly once with the requested model and reasoning setting.
+Filesystem and Git snapshots prove the theme boundary was respected.
+The theme-local npm run build executes deterministically.
+PHP/JavaScript syntax, duplicate PHP declarations, metadata, package-content, and build-artifact checks run.
+A clean installable ZIP is assembled and read back for verification.
+There is no automatic retry, repair pass, or fallback model. If a generation fails any gate, the tool does not package it as successful.
