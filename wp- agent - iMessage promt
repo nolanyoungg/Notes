@@ -1,0 +1,260 @@
+# Build the WP Blog Agent
+
+Work in the repository `nolanyoungg/WP-blog-agent`. Inspect the existing repository before changing anything. Implement the complete working application, not merely a plan or scaffolding.
+
+## Objective
+
+Create a macOS-hosted, local-first blog workflow that:
+
+1. Reads `/manual-files/wordpress-blog-content-tracker.xlsx`.
+2. Finds the next row where `blog_status` is `pending`.
+3. Uses **only** the LM Studio server at `http://192.168.1.35:1234` to generate a high-quality blog draft in Markdown.
+4. Saves the generated draft to disk and sends it to me through iMessage as a `.md` attachment.
+5. Waits for my reply:
+   - `YES <blog_id>` approves it.
+   - `NO <blog_id>` rejects it and stops.
+6. If approved, posts it to WordPress through the WordPress REST API.
+7. Updates the original Excel row only after the corresponding action succeeds.
+8. Never uses any cloud AI provider, Ollama, OpenAI-hosted API, Anthropic, or any other non-LM-Studio model service.
+
+## Required LM Studio policy
+
+LM Studio is the only model provider. Use this server:
+
+```text
+http://192.168.1.35:1234
+```
+
+Use this model first, always:
+
+```text
+openai/gpt-oss-20b
+```
+
+Model-selection behavior:
+
+1. Check LM Studio health and inspect available models through its API.
+2. Use `openai/gpt-oss-20b` if it is loaded and responds.
+3. Retry a transient failure once with the same model.
+4. If that model is unavailable or fails, choose another **LLM only** from the same LM Studio server.
+   - Never select embedding models.
+   - Do not use an external provider.
+   - Do not automatically download any model.
+   - Loading an already-installed LM Studio fallback model is permitted.
+5. Record the actual model used in the run log and Excel tracker.
+6. If no LM Studio LLM can complete the request, mark the row as an error, notify me by iMessage, and do not send content to WordPress.
+
+Use LM Studio’s APIs appropriately:
+
+```text
+GET  /api/v1/models
+GET  /v1/models
+POST /v1/chat/completions
+POST /api/v1/models/load     # only for an already-installed fallback, if needed
+```
+
+Make the base URL, primary model, fallback behavior, timeouts, and retry limits configurable in `.env.example`.
+
+## Excel tracker behavior
+
+The existing sheet is named `Blog tracker` and currently contains:
+
+```text
+blog_id
+blog_topic
+blog_status
+blog_created_date
+blog_posted_date
+```
+
+Preserve all existing data and formatting. Safely add missing operational columns if they do not already exist:
+
+```text
+markdown_path
+review_status
+review_token
+model_used
+wordpress_post_id
+wordpress_url
+last_error
+last_updated_at
+```
+
+Use clear state transitions:
+
+```text
+pending
+generating
+awaiting_review
+approved
+rejected
+posting
+posted
+error
+```
+
+Rules:
+
+- Lock or claim a row before generation so two runs cannot process it twice.
+- Skip rows already in `awaiting_review`, `approved`, `rejected`, `posted`, or `error` unless explicitly retried.
+- Create a unique review token based on the blog ID, such as `YES 2` or `NO 2`.
+- Never overwrite a row’s source topic.
+- Only set `posted`, `blog_posted_date`, WordPress ID, and WordPress URL after WordPress confirms a successful post.
+- If WordPress fails, preserve the generated draft and set the row to `error`.
+- Make all Excel updates atomic: write a temporary file, validate it, then replace the original safely.
+
+## Blog generation
+
+Create a reusable prompt template in the repository. The model should generate a polished, factual, original WordPress blog article from the `blog_topic`.
+
+Each Markdown draft should include:
+
+```markdown
+# Title
+
+Short meta description
+
+## Introduction
+
+## Main sections
+
+## Practical steps or examples
+
+## Conclusion
+```
+
+Requirements:
+
+- Save drafts under a predictable repository directory, such as `data/drafts/<blog_id>-<slug>.md`.
+- Include front matter containing the blog ID, topic, generation timestamp, model used, and review status.
+- Use an appropriate WordPress-ready title, excerpt, slug, categories, and tags.
+- Do not invent citations, product claims, or technical facts.
+- Keep the Markdown source unchanged after approval; convert it to WordPress HTML only for posting.
+
+## iMessage review workflow
+
+This application runs on macOS.
+
+Implement a real iMessage review workflow using macOS-supported automation, with a clean adapter boundary so it can be tested without sending real messages.
+
+When a draft is ready:
+
+1. Send an iMessage to the configured recipient.
+2. Attach the generated `.md` file.
+3. Include a concise message similar to:
+
+```text
+Blog draft #2 is ready: “How to make a full WordPress theme”
+
+Reply exactly:
+YES 2 — post it to WordPress
+NO 2 — reject and stop
+```
+
+For inbound replies:
+
+- Detect only messages from the configured recipient.
+- Accept only exact, case-insensitive `YES <blog_id>` or `NO <blog_id>` responses.
+- Ignore unrelated, stale, malformed, or ambiguous replies.
+- Never approve one blog using a reply intended for another.
+- Record the reply timestamp and decision.
+- Document macOS prerequisites clearly, including Messages sign-in, automation permissions, and Full Disk Access if the reply reader needs it.
+- Send a confirmation iMessage after rejection, successful posting, or an error.
+
+Do not send a real iMessage during automated tests. Provide a dry-run mode and a mock iMessage adapter.
+
+## WordPress publishing
+
+Use the official WordPress REST API endpoint:
+
+```text
+POST /wp-json/wp/v2/posts
+```
+
+Configure these values through environment variables:
+
+```text
+WORDPRESS_BASE_URL
+WORDPRESS_USERNAME
+WORDPRESS_APPLICATION_PASSWORD
+WORDPRESS_POST_STATUS
+```
+
+Security rules:
+
+- Use a dedicated WordPress Application Password, not a normal WordPress login password.
+- Never commit credentials, phone numbers, generated articles, API tokens, or `.env`.
+- Store secrets in environment variables; document optional macOS Keychain usage.
+- Require HTTPS for WordPress unless an explicit development-only override is set.
+
+Posting behavior:
+
+- Default `WORDPRESS_POST_STATUS` to `draft` for safety.
+- Support `publish` only when explicitly configured.
+- Include title, content, excerpt, slug, categories, and tags when available.
+- Save the returned WordPress post ID and URL in Excel.
+- Do not make duplicate posts if the process restarts.
+
+## Reliability, observability, and safety
+
+Implement:
+
+- Structured timestamped logs.
+- Per-run log files under a repository `data/runs/` directory.
+- Human-readable error messages.
+- A dry-run mode that performs everything except sending iMessages and posting to WordPress.
+- Idempotency protection for generation, review, and posting.
+- Configurable polling interval for the worker.
+- A one-shot command to process the next pending row.
+- A long-running worker command for scheduled use.
+- A macOS `launchd` example plist and setup instructions.
+- Graceful behavior if LM Studio, iMessage, WordPress, or Excel is unavailable.
+
+Never silently fall back to a cloud model or a different local provider. If LM Studio cannot provide a usable LLM, stop safely.
+
+## Recommended project structure
+
+Use a clean, maintainable structure similar to:
+
+```text
+src/
+  config/
+  lmstudio/
+  tracker/
+  generation/
+  messaging/
+  wordpress/
+  workflow/
+  cli/
+data/
+  drafts/
+  runs/
+manual-files/
+tests/
+docs/
+```
+
+Use TypeScript and Node.js unless the repository already establishes another stack. Prefer small modules with explicit interfaces for LM Studio, Excel, Messages, and WordPress.
+
+## Validation and delivery
+
+Before finishing:
+
+1. Inspect the existing repository and preserve useful conventions.
+2. Add `.env.example` with every required setting and safe defaults.
+3. Add a comprehensive `README.md` with:
+   - setup instructions;
+   - LM Studio configuration for `http://192.168.1.35:1234`;
+   - how to keep `openai/gpt-oss-20b` as the preferred model;
+   - fallback behavior;
+   - WordPress Application Password setup;
+   - iMessage/macOS permission requirements;
+   - dry-run instructions;
+   - one-shot and worker commands;
+   - troubleshooting.
+4. Add tests using mocked LM Studio, iMessage, WordPress, and tracker adapters.
+5. Run the tests and lint/type checks.
+6. Run a dry-run against a copied fixture workbook, never modifying the original tracker during tests.
+7. Report exactly what was created, what commands passed, any macOS permissions I must grant manually, and any remaining limitations.
+
+Do not stop at a design document. Build and verify the application.
